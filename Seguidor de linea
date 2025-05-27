@@ -1,0 +1,47 @@
+void setup() {
+  Serial.begin(9600); // Inicia la comunicación serie
+}
+
+void loop() {
+  int sensorIzquierdo = analogRead(A0); // Lee el sensor izquierdo
+  int sensorCentro = analogRead(A1);    // Lee el sensor central
+  int sensorDerecho = analogRead(A2);   // Lee el sensor derecho
+
+  // Convierte la lectura en 1 o 0 según el umbral de 400
+  int salidaIzquierdo = (sensorIzquierdo > 400) ? 1 : 0;
+  int salidaCentro = (sensorCentro > 400) ? 1 : 0;
+  int salidaDerecho = (sensorDerecho > 400) ? 1 : 0;
+
+  // Imprime los valores en formato adecuado para Serial Plotter
+  Serial.print(salidaIzquierdo);
+  Serial.print("\t"); // Tabulador para separar valores
+  Serial.print(salidaCentro);
+  Serial.print("\t"); // Tabulador para separar valores
+  Serial.println(salidaDerecho); // Último valor con salto de línea
+
+  delay(100); // Pequeña pausa entre lecturas
+}
+
+void setup() {
+  Serial.begin(9600); // Inicia la comunicación serie
+}
+
+void loop() {
+  int sensorIzquierdo = analogRead(A0); // Lee el sensor izquierdo
+  int sensorCentro = analogRead(A1);    // Lee el sensor central
+  int sensorDerecho = analogRead(A2);   // Lee el sensor derecho
+
+  // Convierte la lectura en 1 o 0 según el umbral de 400
+  int salidaIzquierdo = (sensorIzquierdo > 400) ? 1 : 0;
+  int salidaCentro = (sensorCentro > 400) ? 1 : 0;
+  int salidaDerecho = (sensorDerecho > 400) ? 1 : 0;
+
+  // Imprime los valores en formato adecuado para Serial Plotter
+  Serial.print(salidaIzquierdo);
+  Serial.print("\t"); // Tabulador para separar valores
+  Serial.print(salidaCentro);
+  Serial.print("\t"); // Tabulador para separar valores
+  Serial.println(salidaDerecho); // Último valor con salto de línea
+
+  delay(100); // Pequeña pausa entre lecturas
+}
