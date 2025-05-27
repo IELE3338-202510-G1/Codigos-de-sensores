@@ -1,0 +1,372 @@
+import rclpy
+from rclpy.node import Node
+from std_msgs.msg import Float32MultiArray, Float32
+from std_msgs.msg import Int32
+from sensor_msgs.msg import CompressedImage
+from cv_bridge import CvBridge
+import time
+import numpy as np
+import math
+
+# Definición de las funciones necesarias (suponiendo que ya están implementadas)
+def forward(A1, A2, A3, l1,l2,l3):
+  XY1 = l1*math.cos(math.radians(180-A1))
+  Z1 = l1*math.sin(math.radians(180-A1))
+  theta = (180-A1)-(160-A2)
+  XY2 = l2*math.cos(math.radians(theta))
+  Z2 = l2*math.sin(math.radians(theta))
+  SUM = theta-(A3-85)
+  XY3 = l3*math.cos(math.radians(SUM))
+  Z3 = l3*math.sin(math.radians(SUM))
+
+  # Camara
+  cam_x = 8.7*math.cos(math.radians(SUM+13))
+  cam_z = 8.7*math.sin(math.radians(SUM+13))
+
+  return XY1+XY2+XY3,Z1+Z2+Z3, SUM, XY1+XY2+cam_x,Z1+Z2+cam_z, SUM+13
+
+def proyectar_offset(camera_z, camera_y, angulo, despl_angulo=10, ajuste_y=2):
+    """
+    Retorna offsets x e y totales a partir de valores de cámara y un ángulo.
+
+    Parámetros:
+        camera_z (float): Distancia Z dada por la cámara.
+        camera_y (float): Distancia Y dada por la cámara.
+        angulo (float): Ángulo de referencia (p. ej. forward[2]).
+        despl_angulo (float): Grados a restar al ángulo absoluto (por defecto 10).
+        ajuste_y (float): Corrección fija en Y al combinar proyecciones (por defecto 2).
+
+    Devuelve:
+        x1 (float), y1 (float): Proyección de camera_z.
+        x2 (float), y2 (float): Proyección de |camera_y|.
+        x_tot (float), y_tot (float): Offsets totales combinados.
+    """
+    # Ángulo efectivo
+    ang_eff = abs(angulo) - despl_angulo
+
+    # Proyección de camera_z
+    y1 = camera_z * math.sin(math.radians(ang_eff))
+    x1 = camera_z * math.cos(math.radians(ang_eff))
+
+    # Proyección de |camera_y|
+    y2 = abs(camera_y) * math.cos(math.radians(ang_eff))
+    x2 = abs(camera_y) * math.sin(math.radians(ang_eff))
+
+    # Combina según signo de camera_y
+    if camera_y < 0:
+        y_tot = y1 + y2 - ajuste_y
+        x_tot = x1 - x2
+    else:
+        y_tot = y1 - y2 + ajuste_y
+        x_tot = x1 + x2
+
+    return x1, y1, x2, y2, x_tot, y_tot
+
+def obtener_posicion_objeto(camera_z, camera_y, datos_forward):
+    """
+    Calcula la posición final del objeto en Z y X.
+
+    Parámetros:
+        camera_z (float): Valor Z de la cámara.
+        camera_y (float): Valor Y de la cámara.
+        datos_forward (list o tuple):
+            - datos_forward[2]: ángulo de referencia,
+            - datos_forward[3]: coordenada X de referencia,
+            - datos_forward[4]: coordenada Z de referencia.
+
+    Devuelve:
+        z_obj (float): Coordenada Z del objeto.
+        x_obj (float): Coordenada X (lateral) del objeto.
+    """
+    # Extraemos el ángulo
+    ang = datos_forward[2]
+
+
+    if camera_y < 0:
+        y1 = camera_z*math.sin(math.radians(abs(datos_forward[2])-10))
+        x1 = camera_z*math.cos(math.radians(abs(datos_forward[2])-10))
+        y2 = abs(camera_y)*math.cos(math.radians(abs(datos_forward[2])-10))
+        x2 = abs(camera_y)*math.sin(math.radians(abs(datos_forward[2])-10))
+        ytot = y1+y2-2
+        xtot = x1-x2
+    else:
+        y1 = camera_z*math.sin(math.radians(abs(datos_forward[2])-10))
+        x1 = camera_z*math.cos(math.radians(abs(datos_forward[2])-10))
+
+        y2 = abs(camera_y)*math.cos(math.radians(abs(datos_forward[2])-10))
+        x2 = abs(camera_y)*math.sin(math.radians(abs(datos_forward[2])-10))
+        ytot = y1-y2+2
+        xtot = x1+x2
+    z_obj = datos_forward[4]-ytot-2
+    x_obj = datos_forward[3]+xtot+1
+    
+    return z_obj, x_obj
+
+def arctan(opp, adj):
+    return math.atan2(opp, adj)
+
+def puntos(x,y,z, l1, l2, l3):
+    a = arctan(y,x)
+
+    L = (x**2+y**2)**0.5-l3
+    z= z
+    phi = arctan(z, L)
+    h = (z**2+L**2)**0.5
+    c1 = (l2**2-l1**2-h**2)/(-2*l1*h)
+    theta = math.acos(c1)
+    c2 = (h**2-l1**2-l2**2)/(-2*l1*l2)
+    beta = math.acos(c2)
+    a1 = theta + phi
+    nu = (math.pi-beta)
+    a2 =  a1-nu
+
+    """"
+    plt.scatter((x**2+y**2)**0.5, z)
+    plt.plot([0,l1*math.cos(a1)],[0,l1*math.sin(a1)],)
+    plt.plot([l1*math.cos(a1), l1*math.cos(a1)+l2*math.cos(a2)],[l1*math.sin(a1),l1*math.sin(a1)+l2*math.sin(a2)])
+    plt.plot([l1*math.cos(a1)+l2*math.cos(a2),l1*math.cos(a1)+l2*math.cos(a2)+l3 ],[l1*math.sin(a1)+l2*math.sin(a2),l1*math.sin(a1)+l2*math.sin(a2)])
+    plt.axis('equal')
+    """
+
+    A1 = 180-math.degrees(a1)
+    A2 = 160-math.degrees(nu)
+    A3 = 85+(20-A1+A2)
+
+    return  math.degrees(a),A1, math.degrees(a2),A2,A3, a1, a1-(math.pi-beta)
+
+def calcular_angulo_movimiento(valor_x: float,
+                                       valor_z: float,
+                                       angulo_inicial: float,
+                                       divisor: float = 2.5) -> float:
+            """
+            Calcula el ángulo de desplazamiento (cmover) a partir de las coordenadas valor_x y valor_z
+            y de un ángulo de inicio.
+        
+            Parámetros:
+            - valor_x (float): coordenada X del objeto (puede ser positiva o negativa).
+            - valor_z (float): coordenada Z del objeto (debe ser distinta de cero).
+            - angulo_inicial (float): ángulo de referencia en grados (por defecto 94°).
+            - divisor (float): factor para suavizar el cambio de ángulo (por defecto 2.5).
+        
+            Retorna:
+            - float: ángulo calculado (cmover) en grados.
+            """
+            # ángulo absoluto entre el vector (valor_x, valor_z) y el eje Z
+            t = math.atan(abs(valor_x-3.0)/valor_z)
+            t_deg = math.degrees(t)
+        
+            # ajusta según el signo de valor_x
+            if valor_x < 0:
+                cmover = angulo_inicial - (t_deg / divisor)
+            else:
+                cmover = angulo_inicial + (t_deg / divisor)
+        
+            return cmover
+
+def esperar(segundos: float) -> None:
+    """
+    Pausa la ejecución del programa durante la cantidad de segundos indicada.
+
+    :param segundos: Número de segundos a esperar (puede ser entero o flotante).
+    """
+    time.sleep(segundos)
+        
+class ArmMovementNode(Node):
+    def __init__(self):
+        super().__init__('ArmMovementNode')
+
+        # Parámetros de barrido y cinemática
+        self.min_angle   = 50.0    # límite inferior (grado)
+        self.max_angle   = 130.0    # límite superior (grado)
+        self.step_angle  = 10.0    # salto en cada iteración (grado)
+        self.threshold_x = 20.0      # Umbral en X para considerar que el objeto está dentro del rango
+        self.offset_x    = 3.0       # Compensación en X
+
+        # Estado del brazo
+        self.current_angle = float(self.min_angle)  # Comienza en el mínimo
+        self.found = False  # Para saber si ya encontramos un objeto
+        self.detection_deadline = self.get_clock().now()
+
+        # Publicador para los servos del brazo
+        self.arm_servos_pub = self.create_publisher(Float32MultiArray, '/arm_servos', 10)
+
+        # Suscripción al tópico de posiciones de objetos
+        self.create_subscription(
+            Float32MultiArray,
+            'object_positions',  # Tópico de posiciones de objetos
+            self.object_positions_callback,
+            10
+        )
+        
+        # Suscripción al tópico para iniciar el barrido
+        self.create_subscription(
+            Float32,
+            '/start_sweep',  # Tópico para iniciar el barrido
+            self.start_sweep_callback,
+            10
+        )
+        
+        # Control de tiempo entre barridos (en segundos)
+        self.last_move_time = self.get_clock().now()
+        
+        # Intervalo entre barridos (en segundos)
+        self.sweep_interval = 1.5  # Barrido más lento (0.5 segundos entre cada movimiento)
+        
+        # Variable de control para ejecutar el callback solo cuando se le solicite
+        self.start_sweep = True  # Controla si se debe iniciar el barrido
+        
+        
+    def start_sweep_callback(self, msg):
+        """
+        Callback para iniciar el barrido al recibir un mensaje específico.
+        """
+        
+        if msg.data == 1.0:
+            self.start_sweep = True
+            self.get_logger().info("Iniciando el barrido del brazo.")
+        else:
+            self.start_sweep = False
+            self.get_logger().info("Deteniendo el barrido del brazo.")
+            
+            
+    def object_positions_callback(self, msg):
+        """
+        Callback para recibir las posiciones de los objetos desde el tópico object_positions.
+        Solo se ejecuta cuando start_sweep es True.
+        """
+        if not self.start_sweep:
+            return  # No ejecutar el callback si no se ha solicitado el barrido
+        
+        # Obtenemos las coordenadas y el código de la etiqueta
+        x, y, z, label_code = float(msg.data[0]), float(msg.data[1]), float(msg.data[2]), float(msg.data[3])
+        self.get_logger().info(f"BUSCANDO OBJETO EN: x={x}, y={y}, z={z}, label_code={label_code}")
+        # Si el objeto es visible, comenzamos el barrido y el control del brazo
+        
+        if label_code >= 0.0:
+            self.found = True  # Se ha encontrado un objeto
+            self.get_logger().info(f"Objeto encontrado: {label_code}")
+            # Ajustar el ángulo del servo si |x| está fuera del umbral
+            arm_msg = Float32MultiArray()
+            if abs(x) > self.threshold_x:
+                cmover = calcular_angulo_movimiento(x, z, self.current_angle)
+                # Publicamos con valores por defecto para A1, A2, A3 y flag en 1
+                arm_msg.data = [float(cmover), 40.0, 60.0, 160.0, 0.0, 1.0]  # [cmover, A1, A2, A3, servoGarra (abierta), flag (1)]
+                self.arm_servos_pub.publish(arm_msg)
+                self.get_logger().info(f"Publicado valores (con |x| > threshold): cmover={cmover}, A1=40, A2=60, A3=160")
+
+            
+            else:
+                tiempo_espera = 1
+                # Si |x| está dentro del umbral, realizamos la cinemática inversa
+                A, A1, A2, A3 = self.current_angle, 40.0, 60.0, 160.0
+                l1, l2, l3 = 13.0, 14.215, 16.0
+                # Cálculos de cinemática inversa
+                forward_vals = forward(A1, A2, A3, l1, l2, l3)
+                z_obj, y_obj = obtener_posicion_objeto(z, y, forward_vals)
+                p = puntos(0, y_obj, z_obj, l1, l2, l3)
+                                
+                # 1) Publicar A3 calculado
+                A3 = round(float(p[4]), 2)
+                arm_msg.data = [A, A1, A2, A3, 0.0, 1.0]
+                self.arm_servos_pub.publish(arm_msg)
+                self.get_logger().info(f"Publicado valores: cmover={self.current_angle}, A1={A1}, A2={A2}, A3={A3}")
+
+                # esperar X segundos
+                esperar(tiempo_espera)
+
+                # 2) Publicar A2 calculado, manteniendo A3 anterior
+                A2 = round(float(p[3]), 2)
+                arm_msg.data = [A, A1, A2, A3, 0.0, 1.0]
+                self.arm_servos_pub.publish(arm_msg)
+                self.get_logger().info(f"Publicado valores: cmover={self.current_angle}, A1={A1}, A2={A2}, A3={A3}")
+
+
+                esperar(tiempo_espera)
+
+                # 3) Publicar A1 calculado, manteniendo A2 y A3 anteriores
+                A1 = round(float(p[1]), 2)
+                arm_msg.data = [A, A1, A2, A3, 0.0, 1.0]
+                self.arm_servos_pub.publish(arm_msg)
+                self.get_logger().info(f"Publicado valores: cmover={self.current_angle}, A1={A1}, A2={A2}, A3={A3}")
+
+                esperar(tiempo_espera)
+
+                arm_msg.data = [A, A1, A2, A3, 65.0, 1.0]
+                self.arm_servos_pub.publish(arm_msg)
+                self.get_logger().info(f"Publicado valores: cmover={self.current_angle}, A1={A1}, A2={A2}, A3={A3}")
+
+                esperar(tiempo_espera)
+
+                arm_msg.data = [A, 80, A2, A3, 65.0, 1.0]
+                self.arm_servos_pub.publish(arm_msg)
+
+                esperar(tiempo_espera)
+
+                arm_msg.data = [A, 30.0, 50.0, 120.0, 65.0, 1.0]
+                self.arm_servos_pub.publish(arm_msg)
+
+                esperar(tiempo_espera)
+
+                if label_code == 0:
+                    arm_msg.data = [70.0, 25.0, 25.0, 110.0, 65.0, 1.0]
+                    self.arm_servos_pub.publish(arm_msg)
+
+                    esperar(tiempo_espera)
+
+                    arm_msg.data = [70.0, 25.0, 25.0, 110.0, 0.0, 1.0]
+                    self.arm_servos_pub.publish(arm_msg)
+                elif label_code == 1:
+                    arm_msg.data = [100.0, 25.0, 25.0, 110.0, 65.0, 1.0]
+                    self.arm_servos_pub.publish(arm_msg)
+
+                    esperar(tiempo_espera)
+
+                    arm_msg.data = [100.0, 25.0, 25.0, 110.0, 0.0, 1.0]
+                    self.arm_servos_pub.publish(arm_msg)
+                elif label_code ==2:
+                    arm_msg.data = [85.0, 25.0, 25.0, 110.0, 65.0, 1.0]
+                    self.arm_servos_pub.publish(arm_msg)
+
+                    esperar(tiempo_espera)
+
+                    arm_msg.data = [85.0, 25.0, 25.0, 110.0, 0.0, 1.0]
+                    self.arm_servos_pub.publish(arm_msg)
+                
+                arm_msg.data = [90.0, 0.0, 0.0, 90.0, 0.0, 0.0]
+                self.arm_servos_pub.publish(arm_msg)
+
+                # Resetear el estado de búsqueda
+                self.found = False
+                self.start_sweep = False
+                
+        else:
+            # Si no se ha encontrado un objeto, realizar el barrido
+            current_time = self.get_clock().now()
+            time_diff = (current_time - self.last_move_time).nanoseconds * 1e-9
+
+            # Publicar el valor de step_angle solo si ha pasado el intervalo de barrido
+            if self.current_angle <= self.max_angle and time_diff >= self.sweep_interval:
+                # Publicar el valor de step_angle mientras no se haya encontrado un objeto
+                arm_msg = Float32MultiArray()
+                arm_msg.data = [float(self.current_angle), 40.0, 60.0, 160.0, 0.0, 1.0]  # [step_angle, A1, A2, A3, servoGarra (abierta), flag (1)]
+                self.arm_servos_pub.publish(arm_msg)
+                self.current_angle += self.step_angle  # Incrementar el ángulo del servo
+
+                self.get_logger().info(f"Barrido: Publicando paso de ángulo: {self.current_angle}")
+                self.last_move_time = current_time  # Actualizar el tiempo del último movimiento
+
+            else:
+                # Ir a casa si hemos alcanzado el valor máximo
+                arm_msg = Float32MultiArray()
+                arm_msg.data = [90.0, 0.0, 0.0, 90.0, 0.0, 0.0]
+
+
+def main(args=None):
+    rclpy.init(args=args)
+    node = ArmMovementNode()
+    rclpy.spin(node)
+    node.destroy_node()
+    rclpy.shutdown()
+
+if __name__ == '__main__':
+    main()
