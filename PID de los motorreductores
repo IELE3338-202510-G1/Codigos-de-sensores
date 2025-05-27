@@ -1,0 +1,187 @@
+#include <util/atomic.h>
+#include <Servo.h>
+
+// Clase SimplePID
+class SimplePID {
+  private:
+    float kp, kd, ki, umax;
+    float eprev, eintegral;
+
+  public:
+    SimplePID() : kp(1), kd(0), ki(0), umax(255), eprev(0.0), eintegral(0.0) {}
+
+    void setParams(float kpIn, float kdIn, float kiIn, float umaxIn) {
+      kp = kpIn; kd = kdIn; ki = kiIn; umax = umaxIn;
+    }
+
+    void evalu(int value, int target, float deltaT, int pwmPin, int in1Pin, int in2Pin) {
+      int e = target - value;
+      float dedt = (e - eprev) / deltaT;
+      eintegral += e * deltaT;
+      if (eintegral > 50) eintegral = 50;
+      float u = kp * e + kd * dedt + ki * eintegral;
+
+      int pwr = (int)fabs(u);
+      if (pwr > umax) pwr = umax;
+      if(pwr<=25) pwr = 0;
+      int dir = (u < 0) ? -1 : 1;
+
+
+      setMotor(dir, pwr, pwmPin, in1Pin, in2Pin);
+      eprev = e;
+    }
+
+    void setMotor(int dir, int pwmVal, int pwm, int in1, int in2) {
+      analogWrite(pwm, pwmVal);
+      digitalWrite(in1, dir == 1);
+      digitalWrite(in2, dir == -1);
+    }
+};
+
+// Configuración de motores
+#define NMOTORS 2
+const int ENCA[] = {2, 3};
+const int ENCB[] = {6, 7};
+const int PWM[] = {9, 13};
+const int IN1[] = {23, 24};
+const int IN2[] = {22, 25};
+
+volatile int pos_i[NMOTORS] = {0};
+volatile float velocity_i[NMOTORS] = {0};
+volatile long prevT_i[NMOTORS] = {0};
+long prevT = 0;
+
+// Filtro de media móvil
+#define N 5
+float velBuffer[N] = {0};
+float velBuffer2[N] = {0};
+int bufferIndex = 0;
+
+SimplePID pid[NMOTORS];
+
+// Configuración del servo
+Servo myservo;
+int servoPos = 90;  // Inicializa el timón en 90 grados
+bool increasing = true;
+float lastTimon = -1;  // Variable para almacenar el último valor de timon
+
+float vt_A = 0.0;  // Velocidad inicial del motor A
+float vt_B = 0.0;  // Velocidad inicial del motor B
+float timon = 90.0;  // Ángulo inicial del timón
+
+void setup() {
+  Serial.begin(115200);
+  for (int k = 0; k < NMOTORS; k++) {
+    pinMode(ENCA[k], INPUT);
+    pinMode(ENCB[k], INPUT);
+    pinMode(PWM[k], OUTPUT);
+    pinMode(IN1[k], OUTPUT);
+    pinMode(IN2[k], OUTPUT);
+  }
+
+  attachInterrupt(digitalPinToInterrupt(ENCA[0]), readEncoder<0>, RISING);
+  attachInterrupt(digitalPinToInterrupt(ENCA[1]), readEncoder<1>, RISING);
+
+  pid[0].setParams(0.95, 0.045, 15.0, 255);
+  pid[1].setParams(0.95, 0.045, 15.0, 255);
+
+  myservo.attach(11);
+  myservo.write(servoPos);  // Mueve el servo a la posición inicial
+}
+
+void loop() {
+  static long prevLoopT = 0;
+  long currT = micros();
+
+  // Leemos datos del puerto serial cada cierto tiempo
+  if (Serial.available() > 0) {
+    String data = Serial.readStringUntil('\n');  // Lee el mensaje hasta el salto de línea
+    
+    // Separar los valores de vt_A, vt_B y timon
+    int firstCommaIndex = data.indexOf(',');
+    int secondCommaIndex = data.indexOf(',', firstCommaIndex + 1);
+    
+    if (firstCommaIndex != -1 && secondCommaIndex != -1) {
+      // Extraer y convertir los valores de vt_A, vt_B y timon
+      String vt_A_str = data.substring(0, firstCommaIndex);
+      String vt_B_str = data.substring(firstCommaIndex + 1, secondCommaIndex);
+      String timon_str = data.substring(secondCommaIndex + 1);
+
+      vt_A = vt_A_str.toFloat();
+      vt_B = vt_B_str.toFloat();
+      timon = timon_str.toFloat();
+
+      // Mover el servo solo si el valor de timon ha cambiado
+      if (timon != lastTimon) {
+        myservo.write(timon);  // Mueve el servo al nuevo valor de timon
+        lastTimon = timon;  // Actualiza el último valor de timon
+      }
+    }
+  }
+
+  // Procesamos los motores
+  if (currT - prevLoopT >= 20000) {
+    prevLoopT = currT;
+
+    int pos[NMOTORS] = {0};
+    float velocity[NMOTORS] = {0};
+
+    ATOMIC_BLOCK(ATOMIC_RESTORESTATE) {
+      for (int k = 0; k < NMOTORS; k++) {
+        pos[k] = pos_i[k];
+        velocity[k] = velocity_i[k];
+      }
+    }
+
+    if (currT - prevT_i[0] > 20000) velocity[0] = 0;
+    if (currT - prevT_i[1] > 20000) velocity[1] = 0;
+
+    float deltaT = (currT - prevT) / 1.0e6;
+    prevT = currT;
+
+    float v[NMOTORS];
+    for (int k = 0; k < NMOTORS; k++) {
+      v[k] = velocity[k] / 80.0 * 60.0;
+    }
+
+    velBuffer[bufferIndex] = v[0];
+    velBuffer2[bufferIndex] = v[1];
+    bufferIndex = (bufferIndex + 1) % N;
+
+    float avgVelocity[NMOTORS] = {0};
+    for (int i = 0; i < N; i++) {
+      avgVelocity[0] += velBuffer[i];
+      avgVelocity[1] += velBuffer2[i];
+    }
+    avgVelocity[0] /= N;
+    avgVelocity[1] /= N;
+
+    pid[0].evalu(avgVelocity[0], vt_A, deltaT, PWM[0], IN1[0], IN2[0]);
+    pid[1].evalu(avgVelocity[1], vt_B, deltaT, PWM[1], IN1[1], IN2[1]);
+
+    // Enviar datos de velocidad y valores de vt a serial para monitoreo
+    Serial.print(timon);
+    Serial.print(",");
+    Serial.print(vt_A);
+    Serial.print(",");
+    Serial.print(avgVelocity[0]);
+    Serial.print(",");
+    Serial.print(vt_B);
+    Serial.print(",");
+    Serial.println(avgVelocity[1]);
+
+    delay(10);
+  }
+}
+
+template <int j>
+void readEncoder() {
+  int b = digitalRead(ENCB[j]);
+  pos_i[j] += (b > 0) ? 1 : -1;
+
+  long currT = micros();
+  float deltaT = (currT - prevT_i[j]) / 1.0e6;
+  int direction = (digitalRead(ENCB[j]) == HIGH) ? 1 : -1;
+  velocity_i[j] = direction * (1 / deltaT);
+  prevT_i[j] = currT;
+}
