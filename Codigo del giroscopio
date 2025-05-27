@@ -1,0 +1,89 @@
+codigo del mpu en el mega:#include <Wire.h>
+#include <MPU6050.h>
+
+MPU6050 mpu;
+
+float yaw = 0;
+float yawOffset = 0;
+unsigned long lastTime;
+
+// Configuración del Promedio Móvil
+#define WINDOW_SIZE 5  // Tamaño de la ventana para el promedio móvil
+float yawBuffer[WINDOW_SIZE] = {0};
+int bufferIndex = 0;
+bool bufferFilled = false;
+
+void setup() {
+    Wire.begin();  // SDA = 20, SCL = 21 en Arduino Mega
+    Wire.setClock(400000);  
+    Serial.begin(115200);
+    
+    Serial.println(F("Inicializando MPU6050..."));
+    mpu.initialize();
+
+    if (!mpu.testConnection()) {
+        Serial.println(F("MPU6050 no conectado. Verifica las conexiones."));
+        while (1);
+    }
+
+    Serial.println(F("Calibrando giroscopio..."));
+    calibrarMPU6050();
+    lastTime = millis();
+}
+
+void loop() {
+    calcularAnguloYaw();
+    float promedioYaw = calcularPromedio(yawBuffer, bufferFilled ? WINDOW_SIZE : bufferIndex);
+    
+    
+    Serial.println(promedioYaw);
+    
+    delay(100);
+}
+
+void calibrarMPU6050() {
+    int16_t gx, gy, gz;
+    float sumaYaw = 0;
+    const int muestras = 100;
+
+    for (int i = 0; i < muestras; i++) {
+        mpu.getRotation(&gx, &gy, &gz);
+        sumaYaw += gz / 131.0;
+        delay(10);
+    }
+
+    yawOffset = sumaYaw / muestras;
+    Serial.println(F("Calibración completada."));
+}
+
+void calcularAnguloYaw() {
+    int16_t gx, gy, gz;
+    mpu.getRotation(&gx, &gy, &gz);
+
+    float dt = (millis() - lastTime) / 1000.0;
+    lastTime = millis();
+
+    float gyroYaw = (gz / 131.0) - yawOffset;
+    yaw += gyroYaw * dt;
+
+    // Ajustar para mantener yaw en el rango [-360, 360]
+    if (yaw > 360) yaw -= 360;
+    else if (yaw < -360) yaw += 360;
+
+    // Guardar en el buffer de promedio móvil
+    yawBuffer[bufferIndex] = yaw;
+    bufferIndex++;
+
+    if (bufferIndex >= WINDOW_SIZE) {
+        bufferIndex = 0;
+        bufferFilled = true;
+    }
+}
+
+float calcularPromedio(float *buffer, int count) {
+    float suma = 0;
+    for (int i = 0; i < count; i++) {
+        suma += buffer[i];
+    }
+    return suma / count;
+}
